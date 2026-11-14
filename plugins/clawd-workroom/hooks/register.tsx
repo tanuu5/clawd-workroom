@@ -6,7 +6,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { paletteOf } from './palette'
 import { SCENES, SCENE_LABEL, sceneForHour, sceneName, sceneOf, sceneSvg } from './scene'
-import type { SceneId } from './scene'
+import type { Live, SceneId } from './scene'
 
 const PLUGIN = 'clawd-workroom'
 const COMMAND = 'workroom'
@@ -15,9 +15,11 @@ const BLUR = 9
 /** パネルの濃さの既定値（%）。大きいほど背景が隠れて字が読みやすい */
 const GLASS_DEFAULT = 50
 const AUTO_CHECK_MS = 5 * 60_000
+/** 計器（時刻と使用率）を確かめる間隔。描き直すのは、表示が変わったときだけ */
+const LIVE_CHECK_MS = 15_000
 
 export type Mode = SceneId | 'auto' | 'off'
-type Saved = { mode: Mode; glass: number; headphones: boolean }
+type Saved = { mode: Mode; glass: number; headphones: boolean; live: boolean }
 
 // 打ちやすい呼び名 → 場面
 const WORDS: Record<string, Mode> = {
@@ -75,10 +77,13 @@ async function load($: EngineInterface): Promise<Saved> {
   const mode = await $.store.get('mode')
   const glass = await $.store.get('glass')
   const headphones = await $.store.get('headphones')
+  const live = await $.store.get('live')
 
   return {
     // ヘッドホンは、つけると選んだときだけ（既定はなし）
     headphones: headphones === true,
+    // 計器は、外すと選ばない限り出す（試作中）
+    live: live !== false,
     mode: isMode(mode) ? mode : 'auto',
     glass: typeof glass === 'number' && glass >= 0 && glass <= 100 ? glass : GLASS_DEFAULT,
   }
@@ -89,6 +94,46 @@ let tzOffsetMin: number | undefined
 let applied: string | undefined
 // 最後に背景を頼んだときの、ウィンドウの返事（描かないなら、その理由）
 let refusal: string | undefined
+// 計器を出すか（最後に読んだ設定）と、最後に描いた計器の中身（変わったときだけ描き直す）
+let liveOn = false
+let liveShown = ''
+
+/** 手元の時刻 "HH:MM" */
+function clockOf(now: number): string {
+  const d = new Date(now + (tzOffsetMin ?? 0) * 60_000)
+
+  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+}
+
+/** 計器の中身：時刻・コンテキスト・5 時間枠・7 日枠。アニメを進める秒数は、時刻から決める（描き直しても続きから動く） */
+async function readLive($: EngineInterface): Promise<Live> {
+  // 時差を一度だけ調べる（オートでないときは、まだ調べていない）
+  await localHour($)
+
+  const now = await $.clock.now()
+  const { context, rateLimits } = await $.session.usage()
+  const used = (kind: string) => rateLimits.find(limit => limit.kind === kind)?.percentUsed
+
+  return {
+    clock: clockOf(now),
+    context: context.percent,
+    fiveHour: used('five_hour'),
+    sevenDay: used('seven_day'),
+    elapsed: (now % 86_400_000) / 1000,
+  }
+}
+
+/** 表示が変わったときだけ背景を描き直す */
+async function refreshLive($: EngineInterface): Promise<void> {
+  if (!liveOn || applied === undefined || applied === 'off') return
+
+  const live = await readLive($)
+  const key = `${live.clock}|${live.context}|${live.fiveHour}|${live.sevenDay}`
+
+  if (key === liveShown) return
+  liveShown = key
+  $.ui.invalidate('ui.render')
+}
 
 /** 手元の時刻（時）。時差は /bin/date で 1 回だけ調べる */
 async function localHour($: EngineInterface): Promise<number> {
@@ -110,6 +155,12 @@ type Shown = { scene: SceneId | undefined; isDrawn: boolean; reason?: string }
 
 /** 保存してある選び方のとおりに背景を出す。前と同じなら何もしない */
 async function apply($: EngineInterface, saved: Saved, again = false): Promise<Shown> {
+  if (liveOn !== saved.live) {
+    liveOn = saved.live
+    liveShown = ''
+    $.ui.invalidate('ui.render')
+  }
+
   if (saved.mode === 'off') {
     // 消すのは、このモジュールが出した背景があるときだけ（ほかの mod のテーマを巻き込まない）
     if (applied !== undefined && applied !== 'off') await $.theme.clear()
@@ -151,7 +202,7 @@ function usage(saved: Saved, shown: Shown): string {
   const now =
     saved.mode === 'off'
       ? 'いまはオフ'
-      : `いまは「${shown.scene === undefined ? '?' : SCENE_LABEL[shown.scene]}」${saved.mode === 'auto' ? '（オート）' : ''}・ガラス ${saved.glass}%・ヘッドホン${saved.headphones ? 'あり' : 'なし'}`
+      : `いまは「${shown.scene === undefined ? '?' : SCENE_LABEL[shown.scene]}」${saved.mode === 'auto' ? '（オート）' : ''}・ガラス ${saved.glass}%・ヘッドホン${saved.headphones ? 'あり' : 'なし'}・計器${saved.live ? 'あり' : 'なし'}`
 
   const drawn =
     saved.mode === 'off'
@@ -166,6 +217,7 @@ function usage(saved: Saved, shown: Shown): string {
     `/${COMMAND} オート｜朝｜昼｜夕暮れ｜夜｜雨｜オフ … 場面を選ぶ（オートは時刻に合わせる）`,
     `/${COMMAND} ガラス 0〜100 … パネルの濃さ（小さいほど背景がよく見える。既定 ${GLASS_DEFAULT}）`,
     `/${COMMAND} ヘッドホン あり｜なし … Clawd にヘッドホンをつける（既定はなし）`,
+    `/${COMMAND} 計器 あり｜なし … ニキシー管に時刻、右のパネルにコンテキストと利用枠を出す（試作）`,
   ].join('\n')
 }
 
@@ -181,6 +233,8 @@ export const register: Register = on => {
     await quietly($, async () => apply($, await load($)))
     // オートのとき、時間帯が変わったら場面を替える
     $.clock.every(AUTO_CHECK_MS, () => void quietly($, async () => apply($, await load($))))
+    // 計器：分が変わったときと、使用率が変わったときに描き直す
+    $.clock.every(LIVE_CHECK_MS, () => void quietly($, () => refreshLive($)))
 
     return next(e)
   })
@@ -201,11 +255,33 @@ export const register: Register = on => {
     }
   })
 
-  on('ui.render', { component: 'Backdrop' }, ($, e, next) => {
+  on('ui.render', { component: 'Backdrop' }, async ($, e, next) => {
     // 背景を描けるのはデスクトップのウィンドウだけ。ほかの mod の背景には手を出さない
     if (e.props.plugin !== PLUGIN || e.surface !== 'desktop') return next(e)
 
-    const source = sceneSvg(e.props.scene)
+    let live: Live | undefined
+
+    if (liveOn) {
+      try {
+        live = await readLive($)
+        // 計器のパネルも、会話の列と同じガラス（ぼかし・濃さ）にする。色はアプリの面の色に合わせる
+        const named = sceneOf(e.props.scene)
+        const glass = e.props.glass
+
+        if (named !== undefined && glass !== undefined && glass !== false) {
+          live.glass = {
+            blur: glass.blur ?? 16,
+            opacity: glass.opacity ?? GLASS_DEFAULT / 100,
+            tint: glass.tint ?? paletteOf(named.scene).inputs.dark?.['gray-850'] ?? '#151b33',
+          }
+        }
+        liveShown = `${live.clock}|${live.context}|${live.fiveHour}|${live.sevenDay}`
+      } catch {
+        // 読めなければ、計器なしの絵にする
+      }
+    }
+
+    const source = sceneSvg(e.props.scene, live)
 
     if (source === undefined) return next(e)
 
@@ -250,6 +326,14 @@ async function run($: EngineInterface, args: string): Promise<{ text: string }> 
     }
 
     await $.store.set('headphones', headphones)
+  } else if (first === 'meters' || first === '計器') {
+    const live = onOffOf(words[1])
+
+    if (live === undefined) {
+      return { text: `計器は「あり」か「なし」で指定します（例：/${COMMAND} 計器 なし）` }
+    }
+
+    await $.store.set('live', live)
   } else {
     const mode = modeOf(first)
 

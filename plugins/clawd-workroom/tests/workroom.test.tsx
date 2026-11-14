@@ -186,3 +186,32 @@ test('ヘッドホンは既定では描かず、_hp のついた名前のとき�
     expect((sceneSvg(`${id}_hp`) ?? '').includes(cup)).toBe(true)
   }
 })
+
+test('計器ありの絵：パネルに時刻と使用率、後ろはすりガラス。アニメは経過秒だけ先へずれる', () => {
+  const glass = { blur: 9, opacity: 0.5, tint: '#151b33' }
+  const live = { clock: '21:30', context: 36, fiveHour: 85, sevenDay: undefined, elapsed: 100, glass }
+
+  for (const id of SCENES) {
+    const svg = sceneSvg(id, live) ?? ''
+
+    expect(svg.length < 131072).toBe(true)
+    expect(svg.includes('>21:30</text>')).toBe(true)
+    expect(svg.includes('>36%</text>')).toBe(true)
+    // 80% 以上は赤
+    expect(svg.includes('fill="#ff6b7a" text-anchor="end">85%</text>')).toBe(true)
+    expect(svg.includes('>--</text>')).toBe(true)
+    // パネルの後ろは、背景の写しをぼかして、ガラスの色を重ねる
+    expect(svg.includes('<use href="#bg" filter="url(#fr)"/>')).toBe(true)
+    expect(svg.includes('stdDeviation="7.2"')).toBe(true)
+    expect(svg.includes('fill="#151b33" fill-opacity="0.5"')).toBe(true)
+    // クラスの規則に遅れが足され、要素ごとの遅れ（-2.5s）は 102.5s になる
+    expect(svg.includes('animation:tw 41s steps(1) infinite;animation-delay:-100s}')).toBe(true)
+    expect(svg.includes('animation-delay:-102.5s')).toBe(true)
+  }
+
+  // 計器なしの絵には、計器もすりガラスも出ない
+  const plain = sceneSvg('night') ?? ''
+
+  expect(plain.includes('animation-delay:-100s')).toBe(false)
+  expect(plain.includes('filter="url(#fr)"')).toBe(false)
+})

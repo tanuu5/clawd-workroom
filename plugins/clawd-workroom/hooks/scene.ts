@@ -563,7 +563,72 @@ function lines(x: number, y: number, step: number, rows: readonly (readonly [num
   return out
 }
 
-function holograms(): string {
+/**
+ * 部屋に出す実際の数字（計器）。右のパネルに、時刻とコンテキスト・利用枠を出す。
+ * `elapsed` は、描き直してもアニメが頭に戻らないように、開始時刻をずらす秒数。
+ */
+export type Live = {
+  /** 手元の時刻 "HH:MM" */
+  clock: string
+  /** コンテキストの使用率（%）。まだ計測がなければ undefined */
+  context?: number
+  /** 5 時間枠の使用率（%） */
+  fiveHour?: number
+  /** 7 日枠の使用率（%） */
+  sevenDay?: number
+  /** アニメを進めておく秒数 */
+  elapsed: number
+  /** パネルのすりガラス（会話の列のガラスと同じ設定）。ぼかし（点）・濃さ（0〜1）・色 */
+  glass?: { blur: number; opacity: number; tint: string }
+}
+
+const MONO = 'ui-monospace,SFMono-Regular,Menlo,monospace'
+
+/** 計器のパネルの位置（右のターミナル） */
+const PANEL = { x: 1384, y: 612, w: 186, h: 126 }
+
+/**
+ * 計器のパネルの後ろを、会話の列と同じすりガラスにする：背景（#bg）の写しをぼかして切り抜き、パネルの色を重ねる。
+ * ぼかすのはパネルのまわりだけ（フィルタの範囲を絞って、絵全体を毎回ぼかさない）。
+ */
+function frost(glass: NonNullable<Live['glass']>): string {
+  const { x, y, w, h } = PANEL
+  const m = 24
+
+  return (
+    `<clipPath id="pc"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6"/></clipPath>` +
+    `<filter id="fr" filterUnits="userSpaceOnUse" x="${x - m}" y="${y - m}" width="${w + m * 2}" height="${h + m * 2}"><feGaussianBlur stdDeviation="${n(glass.blur * 0.8)}"/></filter>` +
+    `<g clip-path="url(#pc)"><use href="#bg" filter="url(#fr)"/>` +
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${glass.tint}" fill-opacity="${n(glass.opacity)}"/></g>`
+  )
+}
+
+/** 右のパネル（ターミナル）の中身：見出しの行に時刻、下に 3 行の計器。80% 以上は赤 */
+function meters(live: Live): string {
+  const Wt = '#e8ecff'
+  const rows: [string, number | undefined][] = [
+    ['ctx', live.context],
+    ['5h', live.fiveHour],
+    ['7d', live.sevenDay],
+  ]
+  let out = `<text x="1560" y="632" font-family="${MONO}" font-size="13" fill="#ff7ac8" text-anchor="end">${live.clock}</text>`
+
+  rows.forEach(([label, value], i) => {
+    const y = 662 + i * 27
+    const color = value === undefined ? '#8a8fb0' : value >= 80 ? '#ff6b7a' : '#8dffb0'
+    const width = value === undefined ? 0 : Math.max(2, Math.min(100, value) * 0.7)
+
+    out +=
+      `<text x="1396" y="${y}" font-family="${MONO}" font-size="14" fill="${Wt}" opacity=".85">${label}</text>` +
+      `<rect x="1428" y="${y - 10}" width="70" height="10" rx="2" fill="${Wt}" opacity=".12"/>` +
+      `<rect x="1428" y="${y - 10}" width="${n(width)}" height="10" rx="2" fill="${color}" opacity=".9"/>` +
+      `<text x="1560" y="${y}" font-family="${MONO}" font-size="14" fill="${color}" text-anchor="end">${value === undefined ? '--' : `${Math.round(value)}%`}</text>`
+  })
+
+  return out
+}
+
+function holograms(live?: Live): string {
   const C = '#6fe8ff'
   const P = '#ff7ac8'
   const G = '#8dffb0'
@@ -603,22 +668,27 @@ function holograms(): string {
     ])}</g><rect class="cu" x="1226" y="700" width="5" height="9" fill="${Wt}"/></g>`
 
   const terminal =
-    `<g class="ho" style="animation-delay:-4.5s"><rect x="1384" y="612" width="186" height="126" rx="6" fill="${P}" fill-opacity=".06" stroke="${P}" stroke-opacity=".75" stroke-width="1.5"/>` +
+    `<g class="ho" style="animation-delay:-4.5s">` +
+    (live?.glass === undefined ? '' : frost(live.glass)) +
+    `<rect x="1384" y="612" width="186" height="126" rx="6" fill="${P}" fill-opacity=".06" stroke="${P}" stroke-opacity=".75" stroke-width="1.5"/>` +
     `<rect x="1396" y="624" width="54" height="5" rx="2.5" fill="${P}" opacity=".9"/>` +
-    `<g opacity=".85">${lines(1396, 644, 13, [
-      [0, [[8, Wt], [34, Wt], [40, C]]],
-      [10, [[52, Wt], [60, Wt]]],
-      [0, [[8, Wt], [24, Wt], [24, Wt]]],
-      [10, [[6, G], [86, G]]],
-      [10, [[6, G], [102, G]]],
-      [10, [[6, G], [74, G]]],
-      [10, [[70, Wt], [28, G]]],
-    ])}</g></g>`
+    (live === undefined
+      ? `<g opacity=".85">${lines(1396, 644, 13, [
+          [0, [[8, Wt], [34, Wt], [40, C]]],
+          [10, [[52, Wt], [60, Wt]]],
+          [0, [[8, Wt], [24, Wt], [24, Wt]]],
+          [10, [[6, G], [86, G]]],
+          [10, [[6, G], [102, G]]],
+          [10, [[6, G], [74, G]]],
+          [10, [[70, Wt], [28, G]]],
+        ])}</g>`
+      : meters(live)) +
+    `</g>`
 
   return music + code + terminal
 }
 
-function desk(p: Palette, headphones: boolean): string {
+function desk(p: Palette, headphones: boolean, live?: Live): string {
   const leg = '#aeb2c6'
   // Clawd（PC 作業中のポーズ）。胴体・目・脚の比率は clawd-mascot のまま、1.9 倍で机の向こうのいすに座らせる。
   // 手の先は、画面上で x≈1206 と x≈1434、y≈863 に来る（腕を肩から 30° 下げたとき）。キーボードはその真下に置く。
@@ -675,8 +745,22 @@ function desk(p: Palette, headphones: boolean): string {
     `<circle cx="1500" cy="790" r="6.5" fill="#d7d9e4"/><circle cx="1472" cy="755" r="11" fill="none" stroke="#5ff0ff" stroke-opacity=".22" stroke-width="12"/><circle cx="1472" cy="755" r="11" fill="none" stroke="#8ff6ff" stroke-width="4"/></g>` +
     // ふた付きのカップ
     `<path d="M1547 846l5-20" stroke="#9aa0b8" stroke-width="2" stroke-linecap="round"/><rect x="1538" y="848" width="18" height="24" rx="3" fill="#3a3d4d"/><rect x="1536" y="845" width="22" height="5" rx="2" fill="#565b72"/>` +
-    holograms()
+    holograms(live)
   )
+}
+
+/**
+ * 描き直してもアニメが頭に戻らないように、すべてのアニメの開始を `elapsed` 秒ぶん前へずらす。
+ * クラスの規則には遅れを足し、要素ごとに書いた遅れ（animation-delay:-Xs）にはその分を足す。
+ */
+function shiftAnimations(svg: string, elapsed: number): string {
+  if (elapsed <= 0) return svg
+
+  const style = STYLE.replace(/(\{[^{}]*animation:[^{}]*)\}/g, `$1;animation-delay:-${n(elapsed)}s}`)
+
+  return svg
+    .replace(`<style>${STYLE}</style>`, `<style>${style}</style>`)
+    .replace(/animation-delay:-([\d.]+)s(?=[;"])/g, (_, x: string) => `animation-delay:-${n(Number(x) + elapsed)}s`)
 }
 
 /** 背景に頼むときの名前：場面の名前、ヘッドホンをつけるなら末尾に `_hp` */
@@ -693,8 +777,8 @@ export function sceneOf(name: string): { scene: SceneId; headphones: boolean } |
   return scene === undefined ? undefined : { scene, headphones }
 }
 
-/** 場面の SVG を返す。知らない名前には undefined */
-export function sceneSvg(name: string): string | undefined {
+/** 場面の SVG を返す。知らない名前には undefined。`live` を渡すと、時刻と使用率を部屋に描く */
+export function sceneSvg(name: string, live?: Live): string | undefined {
   const named = sceneOf(name)
 
   if (named === undefined) return undefined
@@ -702,16 +786,20 @@ export function sceneSvg(name: string): string | undefined {
   const p = PALETTES[named.scene]
   const { headphones } = named
 
-  return (
+  const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="xMidYMid slice">` +
     `<style>${STYLE}</style><defs>${defs(p)}</defs>` +
+    // 机より奥（空・街・部屋）。計器のパネルのすりガラスは、この写しをぼかして作る
+    `<g id="bg">` +
     sky(p) +
     city(p) +
     air(p) +
     room(p) +
-    desk(p, headphones) +
+    `</g>` +
+    desk(p, headphones, live) +
     `</svg>`
-  )
+
+  return live === undefined ? svg : shiftAnimations(svg, live.elapsed)
 }
 
 /** 時刻（0〜23 時）に合う場面。FLOW DESK の「オート」と同じ区切り */
