@@ -688,28 +688,152 @@ function holograms(live?: Live): string {
   return music + code + terminal
 }
 
-function desk(p: Palette, headphones: boolean, live?: Live): string {
+/**
+ * Clawd がしていること。`work` は机で作業（いつもの絵）、`window` は手すきで窓辺へ行って外を眺める、
+ * `back` は手すきが終わって（ターンが始まって）、急いでいすへ戻る。
+ * `exercise` は会話の圧縮のあいだ、いすに座ったまま体操する。
+ */
+export type Activity = 'work' | 'window' | 'back' | 'exercise'
+
+/**
+ * 机の Clawd の動き。`since` は、その動きを始めてからの秒数（描き直しても、動きの続きから描く）。
+ * `from` は back のときだけ：戻り始めた位置（窓辺への道のりのうち、歩いた割合 0〜1）
+ */
+export type Act = { activity: Activity; since: number; from?: number }
+
+// Clawd（PC 作業中のポーズ）。胴体・目・脚の比率は clawd-mascot のまま、1.9 倍で机の向こうのいすに座らせる。
+// 手の先は、画面上で x≈1206 と x≈1434、y≈863 に来る（腕を肩から 30° 下げたとき）。キーボードはその真下に置く。
+const PLACE = 'translate(1177.5 739.4) scale(1.9)'
+/** 立ち上がると、座っていたときより上がる量（画面の px） */
+const RISE = 16
+/**
+ * 窓辺へ歩く距離（画面の px、左向きが負）。左の観葉植物の右隣で止まる。
+ * 足の下端は y≈906 で、植木鉢の底（904）とそろう（窓ぎわは奥なので、机の前より床が上に見える）
+ */
+const WALK = -888
+/** 窓辺へ行くまでの秒数：立つ（〜0.8 秒）→ 歩く（〜9.5 秒）→ 窓のほうへ向き直る（〜10 秒） */
+const TO_WINDOW = 11
+/** 窓辺へ向かい始めて `since` 秒の Clawd が、道のりのどこまで歩いたか（0〜1）。wk のキーフレーム（7%〜86% を一定の速さ）に合わせる */
+export function walkProgress(since: number): number {
+  return Math.min(1, Math.max(0, (since / TO_WINDOW - 0.07) / 0.79))
+}
+
+/** 窓辺への道のりを `from`（0〜1）歩いたところから、いすへ戻って座るまでの秒数。行きのおよそ 4 倍の速さで走る */
+export function backSeconds(from: number): number {
+  return Math.round((0.5 + 2.2 * Math.min(1, Math.max(0, from))) * 10) / 10
+}
+
+/** 体操の 1 回分の秒数（腕を上げて下ろす） */
+const BEAT = 2.4
+
+/** ヘッドホン（FLOW DESK の Clawd がつけているもの）。既定ではつけない。clawd-mascot の座標で返す */
+function headphoneParts(headphones: boolean): { band: string; cups: string } {
+  if (!headphones) return { band: '', cups: '' }
+
+  return {
+    band: `<rect x="27" y="2.5" width="96" height="6.5" rx="3" fill="#e4e5ee"/>`,
+    cups:
+      `<rect x="23" y="20" width="11" height="27" rx="3.5" fill="${HEADPHONE}"/><rect x="116" y="20" width="11" height="27" rx="3.5" fill="${HEADPHONE}"/>` +
+      `<circle cx="28.5" cy="33.5" r="3" fill="none" stroke="#5ff0ff" stroke-width="1.4"/><circle cx="121.5" cy="33.5" r="3" fill="none" stroke="#5ff0ff" stroke-width="1.4"/>`,
+  }
+}
+
+const EYES = `<g class="ey" fill="#141414"><rect x="50" y="28" width="13" height="13"/><rect x="88" y="28" width="13" height="13"/></g>`
+const LEGS = 'M32 74h11v22h-11zM53 74h11v22h-11zM86 74h11v22h-11zM107 74h11v22h-11z'
+
+/**
+ * 動きのアニメ。ふだんの規則（STYLE）とは別の <style> に書き、遅れはショートハンドの中に書く
+ * （shiftAnimations の「時刻ぶんずらす」から外すため。こちらは、動きを始めてからの秒数でずらす）。
+ * アニメが止まる設定（視差効果を減らす）では、最後の姿勢で見えるよう、変形の既定値を最後の形にしてある。
+ */
+function actStyle(act: Act): string {
+  const at = (start: number): string => `${n(start - act.since)}s`
+
+  if (act.activity === 'back') {
+    const total = backSeconds(act.from ?? 0)
+    const steps = Math.max(1, Math.ceil((total * 0.85) / 0.25))
+
+    return (
+      `.wk{transform:translate(0,0);animation:bk ${total}s ease-in ${at(0)} 1 both}` +
+      `.l1{animation:lp .25s steps(1) ${at(0)} ${steps} both}.l2{animation:lp .25s steps(1) ${at(0.125)} ${steps} both}` +
+      `.sw{animation:sw .45s ease-in ${at(0)} infinite}` +
+      `@keyframes bk{0%{transform:translate(${n(WALK * (act.from ?? 0))}px,-${RISE}px)}85%{transform:translate(0,-${RISE}px)}100%{transform:translate(0,0)}}` +
+      `@keyframes lp{0%{transform:translateY(-4px)}50%,100%{transform:translateY(0)}}` +
+      `@keyframes sw{0%{opacity:0;transform:translate(0,0)}30%{opacity:1}100%{opacity:0;transform:translate(3px,8px)}}`
+    )
+  }
+
+  if (act.activity === 'window') {
+    return (
+      `.wk{transform:translate(${WALK}px,-${RISE}px);animation:wk ${TO_WINDOW}s linear ${at(0)} 1 both}` +
+      `.l1{animation:lp .5s steps(1) ${at(0.8)} 17 both}.l2{animation:lp .5s steps(1) ${at(1.05)} 17 both}` +
+      `.wf{opacity:0;animation:wf ${TO_WINDOW}s linear ${at(0)} 1 both}` +
+      `.lk{transform-box:fill-box;transform-origin:50% 100%;animation:lk 7s ease-in-out ${at(TO_WINDOW)} infinite alternate}` +
+      `@keyframes wk{0%{transform:translate(0,0)}7%{transform:translate(0,-${RISE}px)}86%,100%{transform:translate(${WALK}px,-${RISE}px)}}` +
+      `@keyframes lp{0%{transform:translateY(-4px)}50%,100%{transform:translateY(0)}}` +
+      `@keyframes wf{0%,88%{opacity:1}92%,100%{opacity:0}}` +
+      `@keyframes lk{from{transform:rotate(-1.2deg)}to{transform:rotate(1.2deg)}}`
+    )
+  }
+
+  return (
+    `.xb{animation:xb ${BEAT}s ease-in-out ${at(0)} infinite}` +
+    `.xL{transform-box:fill-box;transform-origin:100% 50%;animation:xL ${BEAT}s ease-in-out ${at(0)} infinite}` +
+    `.xR{transform-box:fill-box;transform-origin:0% 50%;animation:xR ${BEAT}s ease-in-out ${at(0)} infinite}` +
+    `.n1{opacity:0;animation:xn 3.2s ease-out ${at(0)} infinite}.n2{opacity:0;animation:xn 3.2s ease-out ${at(1.6)} infinite}` +
+    `@keyframes xb{0%,50%,100%{transform:translateY(0)}25%,75%{transform:translateY(-3px)}}` +
+    `@keyframes xL{0%,100%{transform:rotate(-12deg)}50%{transform:rotate(40deg)}}` +
+    `@keyframes xR{0%,100%{transform:rotate(12deg)}50%{transform:rotate(-40deg)}}` +
+    `@keyframes xn{0%{opacity:0;transform:translate(0,0)}20%{opacity:.9}100%{opacity:0;transform:translate(14px,-46px)}}`
+  )
+}
+
+/**
+ * 立ち上がって窓辺へ行く Clawd。最初の姿勢（変形なし）は、座っていた Clawd と同じ位置・同じ脚の位置になる。
+ * 立つ → 左の観葉植物の横まで歩く → 窓のほうへ向き直り（目が見えなくなる）、ゆっくり揺れながら外を眺める。
+ * `isHurrying` のときは、歩いたところから、こちらを向いて汗を飛ばしながら走っていすへ戻り、座る。
+ */
+function toWindow(headphones: boolean, isHurrying: boolean): string {
+  const { band, cups } = headphoneParts(headphones)
+
+  return (
+    `<g class="wk"><g class="${isHurrying ? '' : 'lk'}"><g transform="${PLACE}">` +
+    band +
+    `<g class="l1"><path d="M32 74h11v22h-11zM86 74h11v22h-11z" fill="${CLAWD}"/></g>` +
+    `<g class="l2"><path d="M53 74h11v22h-11zM107 74h11v22h-11z" fill="${CLAWD}"/></g>` +
+    // 腕は体の横に下ろす
+    `<rect x="18" y="46" width="16" height="20" fill="${CLAWD}"/><rect x="116" y="46" width="16" height="20" fill="${CLAWD}"/>` +
+    `<rect x="32" y="8" width="86" height="66" fill="${CLAWD}"/>` +
+    (isHurrying
+      ? // 急いで戻るときは、こちらを向いて汗を飛ばす
+        `${EYES}<path class="sw" d="M124 6c3 4 5 7 5 9a5 5 0 0 1-10 0c0-2 2-5 5-9z" fill="#8fd8ff"/>`
+      : `<g class="wf">${EYES}</g>`) +
+    cups +
+    `</g></g></g>`
+  )
+}
+
+function desk(p: Palette, headphones: boolean, live?: Live, act?: Act): string {
   const leg = '#aeb2c6'
-  // Clawd（PC 作業中のポーズ）。胴体・目・脚の比率は clawd-mascot のまま、1.9 倍で机の向こうのいすに座らせる。
-  // 手の先は、画面上で x≈1206 と x≈1434、y≈863 に来る（腕を肩から 30° 下げたとき）。キーボードはその真下に置く。
-  const PLACE = 'translate(1177.5 739.4) scale(1.9)'
-  // ヘッドホン（FLOW DESK の Clawd がつけているもの）。既定ではつけない
-  const band = headphones ? `<rect x="27" y="2.5" width="96" height="6.5" rx="3" fill="#e4e5ee"/>` : ''
-  const cups = headphones
-    ? `<rect x="23" y="20" width="11" height="27" rx="3.5" fill="${HEADPHONE}"/><rect x="116" y="20" width="11" height="27" rx="3.5" fill="${HEADPHONE}"/>` +
-      `<circle cx="28.5" cy="33.5" r="3" fill="none" stroke="#5ff0ff" stroke-width="1.4"/><circle cx="121.5" cy="33.5" r="3" fill="none" stroke="#5ff0ff" stroke-width="1.4"/>`
-    : ''
+  const { band, cups } = headphoneParts(headphones)
+  // 圧縮中は、いすに座ったまま体操する（腕を上げ下げし、体を少し弾ませる）
+  const isExercise = act?.activity === 'exercise'
   const clawd =
+    (isExercise ? '<g class="xb">' : '') +
     `<g transform="${PLACE}">` +
     band +
-    `<g class="aL"><rect x="12" y="42" width="24" height="22" fill="${CLAWD}"/></g>` +
-    `<g class="aR"><rect x="114" y="42" width="24" height="22" fill="${CLAWD}"/></g>` +
+    `<g class="${isExercise ? 'xL' : 'aL'}"><rect x="12" y="42" width="24" height="22" fill="${CLAWD}"/></g>` +
+    `<g class="${isExercise ? 'xR' : 'aR'}"><rect x="114" y="42" width="24" height="22" fill="${CLAWD}"/></g>` +
     `<rect x="32" y="8" width="86" height="66" fill="${CLAWD}"/>` +
-    `<g class="ey" fill="#141414"><rect x="50" y="28" width="13" height="13"/><rect x="88" y="28" width="13" height="13"/></g>` +
+    EYES +
     cups +
-    `</g>`
+    `</g>` +
+    (isExercise
+      ? '</g><text class="n1" x="1452" y="800" font-size="22" fill="#ffe08a">♪</text><text class="n2" x="1474" y="788" font-size="18" fill="#8dffb0">♪</text>'
+      : '')
+  const isAway = act?.activity === 'window' || act?.activity === 'back'
   // 脚は座面の手前に垂らす（座っているように見せる）
-  const legs = `<path transform="${PLACE}" d="M32 74h11v22h-11zM53 74h11v22h-11zM86 74h11v22h-11zM107 74h11v22h-11z" fill="${CLAWD}"/>`
+  const legs = `<path transform="${PLACE}" d="${LEGS}" fill="${CLAWD}"/>`
 
   let tubes = ''
 
@@ -722,12 +846,12 @@ function desk(p: Palette, headphones: boolean, live?: Live): string {
   }
 
   return (
-    // いすの脚 → 背もたれ → Clawd → 座面 → Clawd の脚 → 机
+    // いすの脚 → 背もたれ → Clawd → 座面 → Clawd の脚 → 机（立っているときは、座面の手前に Clawd を丸ごと描く）
     `<path d="M1320 900v62M1266 986l54-24 54 24" stroke="#20212d" stroke-width="7" fill="none" stroke-linecap="round"/>` +
     `<rect x="1224" y="738" width="192" height="150" rx="18" fill="#2a2b3c"/><rect x="1232" y="744" width="176" height="5" rx="2.5" fill="#3d3f57"/>` +
-    clawd +
+    (isAway ? '' : clawd) +
     `<rect x="1234" y="886" width="172" height="16" rx="7" fill="#34364b"/><rect x="1240" y="887" width="160" height="3" rx="1.5" fill="#4a4d69"/>` +
-    legs +
+    (isAway ? toWindow(headphones, act?.activity === 'back') : legs) +
     `<rect x="1096" y="884" width="13" height="104" fill="${leg}"/><rect x="1523" y="884" width="13" height="104" fill="${leg}"/>` +
     `<rect x="1080" y="984" width="46" height="8" rx="3" fill="${leg}"/><rect x="1506" y="984" width="46" height="8" rx="3" fill="${leg}"/>` +
     `<rect x="1070" y="885" width="492" height="18" fill="url(#led)"/>` +
@@ -777,18 +901,24 @@ export function sceneOf(name: string): { scene: SceneId; headphones: boolean } |
   return scene === undefined ? undefined : { scene, headphones }
 }
 
-/** 場面の SVG を返す。知らない名前には undefined。`live` を渡すと、時刻と使用率を部屋に描く */
-export function sceneSvg(name: string, live?: Live): string | undefined {
+/**
+ * 場面の SVG を返す。知らない名前には undefined。
+ * `live` を渡すと、時刻と使用率を部屋に描く。`act` を渡すと、Clawd がその動き（窓辺・体操）をする（work は机の絵のまま）
+ */
+export function sceneSvg(name: string, live?: Live, act?: Act): string | undefined {
   const named = sceneOf(name)
 
   if (named === undefined) return undefined
 
   const p = PALETTES[named.scene]
   const { headphones } = named
+  const moving = act !== undefined && act.activity !== 'work' ? act : undefined
 
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="xMidYMid slice">` +
-    `<style>${STYLE}</style><defs>${defs(p)}</defs>` +
+    `<style>${STYLE}</style>` +
+    (moving === undefined ? '' : `<style>${actStyle(moving)}</style>`) +
+    `<defs>${defs(p)}</defs>` +
     // 机より奥（空・街・部屋）。計器のパネルのすりガラスは、この写しをぼかして作る
     `<g id="bg">` +
     sky(p) +
@@ -796,7 +926,7 @@ export function sceneSvg(name: string, live?: Live): string | undefined {
     air(p) +
     room(p) +
     `</g>` +
-    desk(p, headphones, live) +
+    desk(p, headphones, live, moving) +
     `</svg>`
 
   return live === undefined ? svg : shiftAnimations(svg, live.elapsed)

@@ -8,7 +8,7 @@
     {
       "name": "clawd-workroom",
       "source": "./plugins/clawd-workroom",
-      "description": "会話の背景を、Clawd（二次創作版）の作業部屋 62F にする。窓の外の街と、机で作業する Clawd。朝・昼・夕暮れ・夜・雨の夜を時刻に合わせて切り替える（/workroom）"
+      "description": "会話の背景を、Clawd（二次創作版）の作業部屋 62F にする。窓の外の街と、机で作業する Clawd。朝・昼・夕暮れ・夜・雨の夜を時刻に合わせて切り替える。手が空くと Clawd は窓辺へ、会話の圧縮中は体操（/workroom）"
     }
   ]
 }

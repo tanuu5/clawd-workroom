@@ -5,8 +5,8 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 import { paletteOf } from './palette'
-import { SCENES, SCENE_LABEL, sceneForHour, sceneName, sceneOf, sceneSvg } from './scene'
-import type { Live, SceneId } from './scene'
+import { SCENES, SCENE_LABEL, backSeconds, sceneForHour, sceneName, sceneOf, sceneSvg, walkProgress } from './scene'
+import type { Activity, Live, SceneId } from './scene'
 
 const PLUGIN = 'clawd-workroom'
 const COMMAND = 'workroom'
@@ -17,9 +17,11 @@ const GLASS_DEFAULT = 50
 const AUTO_CHECK_MS = 5 * 60_000
 /** 計器（時刻と使用率）を確かめる間隔。描き直すのは、表示が変わったときだけ */
 const LIVE_CHECK_MS = 15_000
+/** 手すきになってから、Clawd が窓辺へ行くまでの分数の既定値 */
+const IDLE_MIN_DEFAULT = 3
 
 export type Mode = SceneId | 'auto' | 'off'
-type Saved = { mode: Mode; glass: number; headphones: boolean; live: boolean }
+type Saved = { mode: Mode; glass: number; headphones: boolean; live: boolean; moves: boolean; idleMin: number }
 
 // 打ちやすい呼び名 → 場面
 const WORDS: Record<string, Mode> = {
@@ -78,12 +80,17 @@ async function load($: EngineInterface): Promise<Saved> {
   const glass = await $.store.get('glass')
   const headphones = await $.store.get('headphones')
   const live = await $.store.get('live')
+  const moves = await $.store.get('moves')
+  const idleMin = await $.store.get('idleMin')
 
   return {
     // ヘッドホンは、つけると選んだときだけ（既定はなし）
     headphones: headphones === true,
-    // 計器は、外すと選ばない限り出す（試作中）
+    // 計器は、外すと選ばない限り出す
     live: live !== false,
+    // Clawd の動き（手すきで窓辺・圧縮中に体操）は、「なし」を選ばない限りする
+    moves: moves !== false,
+    idleMin: typeof idleMin === 'number' && idleMin >= 1 && idleMin <= 60 ? idleMin : IDLE_MIN_DEFAULT,
     mode: isMode(mode) ? mode : 'auto',
     glass: typeof glass === 'number' && glass >= 0 && glass <= 100 ? glass : GLASS_DEFAULT,
   }
@@ -97,6 +104,81 @@ let refusal: string | undefined
 // 計器を出すか（最後に読んだ設定）と、最後に描いた計器の中身（変わったときだけ描き直す）
 let liveOn = false
 let liveShown = ''
+// Clawd がいましていること、始めた時刻（ミリ秒）、窓辺へ行かせるタイマー、進んでいる圧縮の数
+let activity: Activity = 'work'
+let activitySince = 0
+// 急いで戻るときの、戻り始めた位置（窓辺への道のりの割合）と、座り終えるタイマー
+let activityFrom = 0
+let backTimer: { cancel: () => void } | undefined
+let idleTimer: { cancel: () => void } | undefined
+let compacting = 0
+// 本体のターンの最中か（ターンの途中の圧縮が終わっても、手すきの時計は回さない）
+let inTurn = false
+
+/** Clawd の動きを替えて、背景を描き直す。同じ動きなら何もしない（動きの途中から描き直さない） */
+async function setActivity($: EngineInterface, next: Activity): Promise<void> {
+  if (next === activity) return
+
+  backTimer?.cancel()
+  backTimer = undefined
+
+  // 動きはすぐ切り替える（時刻を読むのを待たない）。描き直しは、始めた時刻がそろってから頼む
+  activity = next
+  activitySince = await $.clock.now()
+  if (applied !== undefined && applied !== 'off') $.ui.invalidate('ui.render')
+}
+
+/**
+ * 机に戻す。窓辺にいる（向かっている）ときは、そこから急いで走って戻り、座り終えたら作業に戻る。
+ * 座り終えたときに会話の圧縮が進んでいれば、作業ではなく体操を始める
+ */
+async function hurryBack($: EngineInterface): Promise<void> {
+  if (activity !== 'window') {
+    if (activity !== 'back') await setActivity($, 'work')
+
+    return
+  }
+
+  const since = ((await $.clock.now()) - activitySince) / 1000
+
+  activityFrom = walkProgress(since)
+  await setActivity($, 'back')
+  backTimer = $.clock.after(backSeconds(activityFrom) * 1000 + 100, () => {
+    backTimer = undefined
+    if (activity === 'back') void quietly($, () => setActivity($, compacting > 0 ? 'exercise' : 'work'))
+  })
+}
+
+/** 手すきの時計を巻き直す：決めた分数のあいだ次のターンが来なければ、Clawd が窓辺へ行く */
+async function armIdle($: EngineInterface): Promise<void> {
+  idleTimer?.cancel()
+  idleTimer = undefined
+  if (inTurn) return
+
+  const saved = await load($)
+
+  if (!saved.moves) {
+    await setActivity($, 'work')
+
+    return
+  }
+
+  idleTimer = $.clock.after(saved.idleMin * 60_000, () => {
+    idleTimer = undefined
+    if (compacting === 0) void quietly($, () => setActivity($, 'window'))
+  })
+}
+
+/** 「3」「3分」→ 3。1〜60 の整数でなければ undefined */
+export function minutesOf(word: string | undefined): number | undefined {
+  const m = /^(\d{1,2})(分|m|min)?$/.exec((word ?? '').trim().toLowerCase())
+
+  if (m === null) return undefined
+
+  const value = Number(m[1])
+
+  return value >= 1 && value <= 60 ? value : undefined
+}
 
 /** 手元の時刻 "HH:MM" */
 function clockOf(now: number): string {
@@ -202,7 +284,7 @@ function usage(saved: Saved, shown: Shown): string {
   const now =
     saved.mode === 'off'
       ? 'いまはオフ'
-      : `いまは「${shown.scene === undefined ? '?' : SCENE_LABEL[shown.scene]}」${saved.mode === 'auto' ? '（オート）' : ''}・ガラス ${saved.glass}%・ヘッドホン${saved.headphones ? 'あり' : 'なし'}・計器${saved.live ? 'あり' : 'なし'}`
+      : `いまは「${shown.scene === undefined ? '?' : SCENE_LABEL[shown.scene]}」${saved.mode === 'auto' ? '（オート）' : ''}・ガラス ${saved.glass}%・ヘッドホン${saved.headphones ? 'あり' : 'なし'}・計器${saved.live ? 'あり' : 'なし'}・動き${saved.moves ? `あり（${saved.idleMin} 分で窓辺へ）` : 'なし'}`
 
   const drawn =
     saved.mode === 'off'
@@ -217,7 +299,9 @@ function usage(saved: Saved, shown: Shown): string {
     `/${COMMAND} オート｜朝｜昼｜夕暮れ｜夜｜雨｜オフ … 場面を選ぶ（オートは時刻に合わせる）`,
     `/${COMMAND} ガラス 0〜100 … パネルの濃さ（小さいほど背景がよく見える。既定 ${GLASS_DEFAULT}）`,
     `/${COMMAND} ヘッドホン あり｜なし … Clawd にヘッドホンをつける（既定はなし）`,
-    `/${COMMAND} 計器 あり｜なし … ニキシー管に時刻、右のパネルにコンテキストと利用枠を出す（試作）`,
+    `/${COMMAND} 計器 あり｜なし … 右のパネルに時刻とコンテキスト・利用枠を出す`,
+    `/${COMMAND} 動き あり｜なし … 手すきのときは窓辺で外を眺め、会話の圧縮中は体操する`,
+    `/${COMMAND} 窓辺 1〜60 … 手すきになって何分で窓辺へ行くか（既定 ${IDLE_MIN_DEFAULT}）`,
   ].join('\n')
 }
 
@@ -235,8 +319,65 @@ export const register: Register = on => {
     $.clock.every(AUTO_CHECK_MS, () => void quietly($, async () => apply($, await load($))))
     // 計器：分が変わったときと、使用率が変わったときに描き直す
     $.clock.every(LIVE_CHECK_MS, () => void quietly($, () => refreshLive($)))
+    // 開いたままのセッションも、手すきの時計を回す
+    await quietly($, () => armIdle($))
 
     return next(e)
+  })
+
+  // 本体のターンが始まったら机に戻り、終わったら手すきの時計を巻き直す（サブエージェントのターンは見ない）
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      inTurn = true
+      idleTimer?.cancel()
+      idleTimer = undefined
+      if (compacting === 0) await quietly($, () => hurryBack($))
+    }
+
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+
+    if (e.agentId === undefined) {
+      inTurn = false
+      await quietly($, () => armIdle($))
+    }
+
+    return result
+  })
+
+  // 会話の圧縮のあいだは体操する。終わったら机に戻る。
+  // 放置中に先回りで要約を作る圧縮（precompute）でも体操する（再開したときの圧縮は、その要約を差し込むだけで一瞬で終わるため）。
+  // サブエージェントの圧縮は、画面に関係ないので見ない
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+
+    let moves = false
+
+    await quietly($, async () => {
+      moves = (await load($)).moves
+    })
+
+    if (!moves) return next(e)
+
+    compacting++
+    idleTimer?.cancel()
+    idleTimer = undefined
+    // 窓辺にいたら（向かっている途中・戻っている途中も）、走って戻って座ってから体操する
+    await quietly($, () => (activity === 'window' || activity === 'back' ? hurryBack($) : setActivity($, 'exercise')))
+
+    try {
+      return await next(e)
+    } finally {
+      compacting--
+      if (compacting === 0) {
+        // 走って戻っている途中なら、座り終えるまで待つ（先に作ってあった要約を差し込むだけの圧縮は、一瞬で終わる）
+        if (activity !== 'back') await quietly($, () => setActivity($, 'work'))
+        await quietly($, () => armIdle($))
+      }
+    }
   })
 
   // ほかのセッションで選び直した結果を、次に送るときに取り込む
@@ -281,7 +422,17 @@ export const register: Register = on => {
       }
     }
 
-    const source = sceneSvg(e.props.scene, live)
+    let since = 0
+
+    if (activity !== 'work') {
+      try {
+        since = Math.max(0, ((await $.clock.now()) - activitySince) / 1000)
+      } catch {
+        // 時刻が読めなければ、動きの頭から描く
+      }
+    }
+
+    const source = sceneSvg(e.props.scene, live, { activity, since, from: activityFrom })
 
     if (source === undefined) return next(e)
 
@@ -334,6 +485,24 @@ async function run($: EngineInterface, args: string): Promise<{ text: string }> 
     }
 
     await $.store.set('live', live)
+  } else if (first === 'moves' || first === '動き') {
+    const moves = onOffOf(words[1])
+
+    if (moves === undefined) {
+      return { text: `動きは「あり」か「なし」で指定します（例：/${COMMAND} 動き なし）` }
+    }
+
+    await $.store.set('moves', moves)
+    await armIdle($)
+  } else if (first === 'window' || first === '窓辺') {
+    const minutes = minutesOf(words[1])
+
+    if (minutes === undefined) {
+      return { text: `窓辺は 1〜60 の分数で指定します（例：/${COMMAND} 窓辺 1）` }
+    }
+
+    await $.store.set('idleMin', minutes)
+    await armIdle($)
   } else {
     const mode = modeOf(first)
 
